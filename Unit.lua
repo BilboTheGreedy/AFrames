@@ -74,6 +74,8 @@ local function dispelColor(unit, data)
 	return nil
 end
 
+ns.Yes = yes
+
 local function auraIcon(b, size)
 	local f = CreateFrame("Frame", nil, b.body)
 	f:SetSize(size, size)
@@ -83,12 +85,36 @@ local function auraIcon(b, size)
 	f.edges = UI.Border(f, { 0, 0, 0, 1 })
 	f.count = UI.Text(f, "NumberFontNormalSmall", "RIGHT")
 	f.count:SetPoint("BOTTOMRIGHT", 2, -1)
+	if b.timers then
+		local ok, cd = pcall(CreateFrame, "Cooldown", nil, f, "CooldownFrameTemplate")
+		if ok and cd then
+			cd:SetAllPoints(f)
+			if cd.SetReverse then cd:SetReverse(true) end
+			f.cd = cd
+		end
+	end
 	return f
 end
 
-local function fillAuras(b, icons, filter, max, size, highlight)
+local function setTimer(icon, unit, data)
+	local cd = icon.cd
+	if not cd then return end
+	if C_UnitAuras.GetAuraDuration and cd.SetCooldownFromDurationObject and data.auraInstanceID then
+		local ok, d = pcall(C_UnitAuras.GetAuraDuration, unit, data.auraInstanceID)
+		if ok and d and pcall(cd.SetCooldownFromDurationObject, cd, d) then return end
+	end
+	local dur, exp = data.duration, data.expirationTime
+	if not secret(dur) and not secret(exp) and type(dur) == "number" and type(exp) == "number" and dur > 0 then
+		cd:SetCooldown(exp - dur, dur)
+	elseif cd.Clear then
+		cd:Clear()
+	end
+end
+
+local function fillAuras(b, icons, filter, max, size, highlight, big)
 	local unit = b.unit
 	local shown = 0
+	local first
 	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
 		for i = 1, max do
 			local ok, data = pcall(C_UnitAuras.GetAuraDataByIndex, unit, i, filter)
@@ -99,6 +125,11 @@ local function fillAuras(b, icons, filter, max, size, highlight)
 				icon = auraIcon(b, size)
 				icons[shown] = icon
 			end
+			local own = data.isFromPlayerOrPlayerPet
+			local s = size
+			if big and not secret(own) and own then s = size + 6 end
+			icon.size = s
+			icon:SetSize(s, s)
 			icon.tex:SetTexture(data.icon)
 			if C_UnitAuras.GetAuraApplicationDisplayCount and data.auraInstanceID then
 				local okc, text = pcall(C_UnitAuras.GetAuraApplicationDisplayCount, unit, data.auraInstanceID, 2, 99)
@@ -117,8 +148,10 @@ local function fillAuras(b, icons, filter, max, size, highlight)
 					icon.count:SetText("")
 				end
 			end
+			setTimer(icon, unit, data)
 			local r, g, bl, a
 			if highlight then r, g, bl, a = dispelColor(unit, data) end
+			if r and not first then first = { r, g, bl, a or 1 } end
 			for _, e in ipairs(icon.edges) do
 				if r then
 					e:SetColorTexture(r, g, bl, a or 1)
@@ -130,42 +163,76 @@ local function fillAuras(b, icons, filter, max, size, highlight)
 		end
 	end
 	for i = shown + 1, #icons do icons[i]:Hide() end
-	return shown
+	return shown, first
 end
 
 local function placeAuras(b)
-	local x, y = 0, 0
-	local function put(icon, size)
+	local x, y, row = 0, 0, 0
+	local width = b:GetWidth() or 200
+	local function put(icon)
+		local size = icon.size or 20
 		icon:ClearAllPoints()
-		if b.auraSide == "RIGHT" then
+		if b.auraSide == "INSIDE" then
+			icon:SetPoint("BOTTOMLEFT", b.body, "BOTTOMLEFT", 2 + x, 5)
+		elseif b.auraSide == "RIGHT" then
 			icon:SetPoint("TOPLEFT", b.body, "TOPRIGHT", 4 + x, y)
 		else
-			icon:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", x, -4)
+			if x + size > width and x > 0 then
+				x = 0
+				y = y - row - 2
+				row = 0
+			end
+			icon:SetPoint("TOPLEFT", b.body, "BOTTOMLEFT", x, y - 4 - (b.auraOffset or 0))
 		end
+		if size > row then row = size end
 		x = x + size + 2
 	end
 	for _, icon in ipairs(b.debuffs) do
-		if icon:IsShown() then put(icon, 22) end
+		if icon:IsShown() then put(icon) end
 	end
 	if b.auraSide == "RIGHT" then
 		x, y = 0, -24
+	elseif b.auraSide == "BELOW" and b.auraRows then
+		if x > 0 then
+			x = 0
+			y = y - row - 2
+			row = 0
+		end
 	elseif x > 0 then
 		x = x + 6
 	end
 	for _, icon in ipairs(b.buffs) do
-		if icon:IsShown() then put(icon, 16) end
+		if icon:IsShown() then put(icon) end
 	end
 end
 
 function ns.UpdateAuras(b)
 	local db = ns.db
+	if b.style == "small" then return end
 	local hostile = yes(UnitCanAttack and UnitCanAttack("player", b.unit))
-	fillAuras(b, b.debuffs, hostile and "HARMFUL|PLAYER" or "HARMFUL", db.debuffs and 4 or 0, 22, not hostile)
-	fillAuras(b, b.buffs, hostile and "HELPFUL" or "HELPFUL|PLAYER", db.buffs and 4 or 0, 16, false)
+	local nd, nb = b.maxDebuffs or 4, b.maxBuffs or 4
+	if not db.debuffs then nd = 0 end
+	if not db.buffs then nb = 0 end
+	local dfilter, bfilter
+	if b.allAuras then
+		dfilter, bfilter = "HARMFUL", "HELPFUL"
+	else
+		dfilter = hostile and "HARMFUL|PLAYER" or "HARMFUL"
+		bfilter = hostile and "HELPFUL" or "HELPFUL|PLAYER"
+	end
+	local _, color = fillAuras(b, b.debuffs, dfilter, nd, b.debuffSize or 22, not hostile, b.allAuras)
+	fillAuras(b, b.buffs, bfilter, nb, b.buffSize or 16, false, false)
 	placeAuras(b)
+	if b.style == "raid" then
+		b.dispel = color
+		ns.UpdateTarget(b)
+	end
 end
 
 local function barColor(unit)
+	if not yes(UnitIsPlayer(unit)) and UnitIsTapDenied and yes(UnitIsTapDenied(unit)) then
+		return 0.5, 0.5, 0.5
+	end
 	if ns.db.classColor and yes(UnitIsPlayer(unit)) then
 		local _, class = UnitClass(unit)
 		local c = not secret(class) and class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
@@ -198,6 +265,7 @@ function ns.UpdateHealth(b)
 
 	local t = b.health.right
 	local mode = ns.db.healthText
+	if b.style ~= "full" and not state then mode = "none" end
 	if state then
 		t:SetText(state)
 	elseif mode == "percent" then
@@ -233,7 +301,8 @@ function ns.UpdateHealth(b)
 		b.health.left:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
 	else
 		b.health:SetColor(barColor(unit))
-		b.health.left:SetTextColor(C.text[1], C.text[2], C.text[3])
+		local n = b.nameColor or C.text
+		b.health.left:SetTextColor(n[1], n[2], n[3])
 	end
 
 	if UnitGetIncomingHeals and not state then
@@ -263,16 +332,58 @@ function ns.UpdatePower(b)
 	b.power:SetValue(UnitPower(unit))
 end
 
+local TAGS = { elite = "+", rareelite = "R+", rare = "R", worldboss = "B" }
+
+local function levelColor(level)
+	if GetQuestDifficultyColor then
+		local ok, c = pcall(GetQuestDifficultyColor, level)
+		if ok and type(c) == "table" and c.r then return c.r, c.g, c.b end
+	end
+	local mine = UnitLevel("player")
+	if secret(mine) or type(mine) ~= "number" then return C.dim[1], C.dim[2], C.dim[3] end
+	local diff = level - mine
+	if diff >= 5 then return 1, 0.1, 0.1 end
+	if diff >= 3 then return 1, 0.5, 0.25 end
+	if diff >= -2 then return 1, 0.82, 0 end
+	if diff >= -8 then return 0.25, 0.75, 0.25 end
+	return 0.6, 0.6, 0.6
+end
+
 function ns.UpdateName(b)
 	local unit = b.unit
 	b.health.left:SetText(UnitName(unit))
+	if b.unit == "pet" and GetPetHappiness then
+		local ok, mood = pcall(GetPetHappiness)
+		if ok and not secret(mood) and type(mood) == "number" then
+			if mood >= 3 then
+				b.nameColor = { 0.4, 1, 0.4 }
+			elseif mood == 2 then
+				b.nameColor = { 1, 0.9, 0.3 }
+			else
+				b.nameColor = { 1, 0.35, 0.3 }
+			end
+		end
+	end
+	if not b.level then return end
 	local level = UnitLevel(unit)
+	local tag = ""
+	if b.classify and UnitClassification then
+		local kind = UnitClassification(unit)
+		if not secret(kind) and kind then tag = TAGS[kind] or "" end
+	end
 	if secret(level) then
 		b.level:SetText(level)
+		b.level:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
 	elseif not level or level <= 0 then
-		b.level:SetText("??")
+		b.level:SetText("??" .. tag)
+		b.level:SetTextColor(1, 0.1, 0.1)
 	else
-		b.level:SetText(level)
+		b.level:SetText(level .. tag)
+		if yes(UnitCanAttack and UnitCanAttack("player", unit)) then
+			b.level:SetTextColor(levelColor(level))
+		else
+			b.level:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
+		end
 	end
 end
 
@@ -287,6 +398,21 @@ function ns.UpdateIcons(b)
 	else
 		b.role:SetText("")
 	end
+	if b.ready then
+		local status = GetReadyCheckStatus and GetReadyCheckStatus(unit)
+		if secret(status) or not status then
+			b.ready:Hide()
+		else
+			if status == "ready" then
+				b.ready:SetTexture("Interface\\RaidFrame\\ReadyCheck-Ready")
+			elseif status == "notready" then
+				b.ready:SetTexture("Interface\\RaidFrame\\ReadyCheck-NotReady")
+			else
+				b.ready:SetTexture("Interface\\RaidFrame\\ReadyCheck-Waiting")
+			end
+			b.ready:Show()
+		end
+	end
 	local index = GetRaidTargetIndex and GetRaidTargetIndex(unit)
 	if not secret(index) and index and SetRaidTargetIconTexture then
 		b.mark:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
@@ -299,7 +425,7 @@ end
 
 function ns.UpdateTarget(b)
 	local on = b.unit ~= "target" and yes(UnitIsUnit(b.unit, "target"))
-	local c = on and C.accent or C.line
+	local c = on and C.accent or b.dispel or C.line
 	for _, e in ipairs(b.edges) do
 		e:SetColorTexture(c[1], c[2], c[3], 1)
 	end
@@ -333,6 +459,7 @@ function ns.UpdateAll(b)
 	ns.UpdateTarget(b)
 	ns.UpdateAuras(b)
 	ns.UpdateRange(b)
+	if ns.UpdateExtras then ns.UpdateExtras(b) end
 end
 
 function ns.Each(fn, unit)
@@ -350,13 +477,20 @@ function ns.Each(fn, unit)
 	end
 end
 
-function ns.CreateUnit(name, parent, unit, width, height, auraSide)
+function ns.Resize(b, width, height)
+	b:SetSize(width, height)
+	b.pred:SetWidth(width - 2)
+	if b.onResize then b.onResize(b, width, height) end
+end
+
+function ns.CreateUnit(name, parent, unit, style, auraSide)
 	local ok, b = pcall(CreateFrame, "Button", name, parent, "SecureUnitButtonTemplate")
 	if not ok or not b then b = CreateFrame("Button", name, parent) end
 	b.unit = unit
+	b.style = style
 	b.auraSide = auraSide
-	b.ranged = unit:find("^party") ~= nil
-	b:SetSize(width, height)
+	b.ranged = unit:find("^party") ~= nil or unit:find("^raid") ~= nil
+	b:SetSize(100, 30)
 	b:SetAttribute("unit", unit)
 	b:SetAttribute("*type1", "target")
 	b:SetAttribute("*type2", "togglemenu")
@@ -368,14 +502,14 @@ function ns.CreateUnit(name, parent, unit, width, height, auraSide)
 	b.body = body
 	b.edges = UI.Border(body)
 
-	local power = UI.Bar(body, 6)
+	local power = UI.Bar(body, style == "full" and 6 or 3)
 	power:SetPoint("BOTTOMLEFT", 1, 1)
 	power:SetPoint("BOTTOMRIGHT", -1, 1)
 	power.left:Hide()
 	power.right:Hide()
 	b.power = power
 
-	local health = UI.Bar(body, height - 9)
+	local health = UI.Bar(body, 20)
 	health:SetPoint("TOPLEFT", 1, -1)
 	health:SetPoint("TOPRIGHT", -1, -1)
 	health:SetPoint("BOTTOMLEFT", power, "TOPLEFT", 0, 1)
@@ -388,7 +522,7 @@ function ns.CreateUnit(name, parent, unit, width, height, auraSide)
 	local fill = health:GetStatusBarTexture()
 	pred:SetPoint("TOPLEFT", fill or health, "TOPRIGHT")
 	pred:SetPoint("BOTTOMLEFT", fill or health, "BOTTOMRIGHT")
-	pred:SetWidth(width - 2)
+	pred:SetWidth(98)
 	pred:Hide()
 	b.pred = pred
 
@@ -397,12 +531,16 @@ function ns.CreateUnit(name, parent, unit, width, height, auraSide)
 	over:SetFrameLevel((body:GetFrameLevel() or 1) + 5)
 	b.over = over
 
-	b.level = UI.Text(over, "GameFontHighlightSmall", "LEFT", C.dim)
-	b.level:SetPoint("LEFT", health, "LEFT", 5, 0)
 	health.left:SetParent(over)
 	health.right:SetParent(over)
 	health.left:ClearAllPoints()
-	health.left:SetPoint("LEFT", b.level, "RIGHT", 4, 0)
+	if style == "full" then
+		b.level = UI.Text(over, "GameFontHighlightSmall", "LEFT", C.dim)
+		b.level:SetPoint("LEFT", health, "LEFT", 5, 0)
+		health.left:SetPoint("LEFT", b.level, "RIGHT", 4, 0)
+	else
+		health.left:SetPoint("LEFT", health, "LEFT", 4, 0)
+	end
 	health.left:SetPoint("RIGHT", health.right, "LEFT", -4, 0)
 
 	b.leader = over:CreateTexture(nil, "OVERLAY")
@@ -418,6 +556,14 @@ function ns.CreateUnit(name, parent, unit, width, height, auraSide)
 	b.mark:SetSize(16, 16)
 	b.mark:SetPoint("CENTER", over, "TOP", 0, 2)
 	b.mark:Hide()
+
+	if style == "raid" then
+		b.ready = over:CreateTexture(nil, "OVERLAY")
+		b.ready:SetSize(16, 16)
+		b.ready:SetPoint("CENTER", over, "CENTER", 0, 0)
+		b.ready:Hide()
+		b.maxDebuffs, b.maxBuffs, b.debuffSize = 2, 0, 13
+	end
 
 	b.debuffs = {}
 	b.buffs = {}
@@ -464,5 +610,14 @@ ns:On("PLAYER_ROLES_ASSIGNED", function() ns.Each(ns.UpdateIcons) end)
 ns:On("RAID_TARGET_UPDATE", function() ns.Each(ns.UpdateIcons) end)
 ns:On("PLAYER_TARGET_CHANGED", function()
 	ns.Each(ns.UpdateAll, "target")
+	ns.Each(ns.UpdateAll, "targettarget")
 	ns.Each(ns.UpdateTarget)
 end)
+ns:On("PLAYER_FOCUS_CHANGED", function() ns.Each(ns.UpdateAll, "focus") end)
+ns:On("UNIT_PET", function() ns.Each(ns.UpdateAll) end)
+ns:On("UNIT_HAPPINESS", function() ns.Each(ns.UpdateName, "pet") end)
+ns:On("UNIT_CLASSIFICATION_CHANGED", function(unit) ns.Each(ns.UpdateName, unit) end)
+ns:On("UNIT_FACTION", function(unit) ns.Each(ns.UpdateAll, unit) end)
+ns:On("READY_CHECK", function() ns.Each(ns.UpdateIcons) end)
+ns:On("READY_CHECK_CONFIRM", function() ns.Each(ns.UpdateIcons) end)
+ns:On("READY_CHECK_FINISHED", function() ns.Each(ns.UpdateIcons) end)

@@ -8,15 +8,25 @@ local defaults = {
 	buffs = true,
 	range = true,
 	tooltips = true,
-	window = {},
-	party = { enabled = true, player = false, raid = false, horizontal = false, scale = 1, default = { "TOPLEFT", "TOPLEFT", 24, -190 } },
-	player = { enabled = false, scale = 1, default = { "CENTER", "CENTER", -270, -150 } },
-	target = { enabled = false, scale = 1, default = { "CENTER", "CENTER", 270, -150 } },
+	units = {
+		player = { on = true, w = 220, h = 46, portrait = false, icons = true, scale = 1, default = { "CENTER", "CENTER", -270, -170 } },
+		target = { on = true, w = 220, h = 46, portrait = false, castbar = true, combo = true, auras = true, scale = 1, default = { "CENTER", "CENTER", 270, -170 } },
+		tot = { on = true, w = 110, h = 26, scale = 1, default = { "CENTER", "CENTER", 440, -180 } },
+		pet = { on = true, w = 120, h = 28, scale = 1, default = { "CENTER", "CENTER", -320, -226 } },
+		focus = { on = true, w = 170, h = 38, scale = 1, default = { "CENTER", "CENTER", -460, -40 } },
+		party = { on = true, player = false, raid = false, horizontal = false, pets = false, w = 176, h = 40, scale = 1, default = { "TOPLEFT", "TOPLEFT", 24, -190 } },
+		raid = { on = true, forParty = false, hideDefault = true, w = 74, h = 36, scale = 1, default = { "TOPLEFT", "TOPLEFT", 24, -160 } },
+	},
 }
 
-ACore.New(ADDON, ns, { db = "AFramesDB", defaults = defaults })
+ns.KEYS = { "player", "target", "tot", "pet", "focus", "party", "raid" }
+ns.TITLES = {
+	player = "Player", target = "Target", tot = "Target of target", pet = "Pet", focus = "Focus",
+	party = "Party", raid = "Raid",
+}
 
-ns.unlocked = false
+ACore.New(ADDON, ns, { db = "AFramesDB", defaults = defaults, profile = true })
+
 ns.queue = {}
 
 function ns.InCombat()
@@ -38,12 +48,31 @@ ns:On("PLAYER_REGEN_ENABLED", function()
 	for _, fn in pairs(q) do fn() end
 end)
 
+function ns.HasACast()
+	if ACastDB ~= nil then return true end
+	local loaded = (C_AddOns and C_AddOns.IsAddOnLoaded) or IsAddOnLoaded
+	if loaded then
+		local ok, v = pcall(loaded, "ACast")
+		if ok and v then return true end
+	end
+	return false
+end
+
+function ns.ToggleOptions()
+	if ACore.OpenPanel then
+		ACore.OpenPanel("AFrames")
+	else
+		ns.UI.Menu(UIParent, ns.Options())
+	end
+end
+
 ACore.Register({
 	name = "AFrames",
 	title = "AFrames",
 	slash = "/aframes",
-	desc = "party, player and target frames",
+	desc = "player, target, pet, focus, party and raid frames",
 	toggle = function() ns.ToggleOptions() end,
+	options = function() return ns.Options() end,
 })
 
 SLASH_AFRAMES1 = "/aframes"
@@ -53,13 +82,13 @@ SlashCmdList["AFRAMES"] = function(msg)
 	if msg == "" then
 		ns.ToggleOptions()
 	elseif msg == "unlock" or msg == "move" then
-		ns.SetUnlocked(true)
+		if not ACore.LayoutMode(true) then ns.Print("cannot move frames in combat") end
 	elseif msg == "lock" then
-		ns.SetUnlocked(false)
+		ACore.LayoutMode(false)
 	elseif msg == "reset" then
-		for _, key in ipairs({ "party", "player", "target" }) do
-			ns.db[key].pos = nil
-			ns.db[key].scale = 1
+		for _, key in ipairs(ns.KEYS) do
+			ns.db.units[key].pos = nil
+			ns.db.units[key].scale = 1
 		end
 		ns.Apply()
 	else

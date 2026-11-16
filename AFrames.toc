@@ -1,0 +1,13 @@
+## Interface: 16001
+## Title: AFrames
+## Notes: Party, player and target frames
+## Version: 0.1.0
+## Category: Unit Frames
+## IconTexture: Interface\Icons\Spell_Holy_PrayerOfHealing
+## Dependencies: ACore
+## SavedVariables: AFramesDB
+
+Core.lua
+Unit.lua
+Layout.lua
+Options.lua

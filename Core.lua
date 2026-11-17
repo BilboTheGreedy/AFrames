@@ -8,15 +8,30 @@ local defaults = {
 	buffs = true,
 	range = true,
 	tooltips = true,
+	threat = true,
+	powerText = false,
+	dispelMine = false,
+	auraScale = 1,
+	clicks = {},
 	units = {
-		player = { on = true, w = 220, h = 46, portrait = false, icons = true, scale = 1, default = { "CENTER", "CENTER", -270, -170 } },
-		target = { on = true, w = 220, h = 46, portrait = false, castbar = true, combo = true, auras = true, scale = 1, default = { "CENTER", "CENTER", 270, -170 } },
-		tot = { on = true, w = 110, h = 26, scale = 1, default = { "CENTER", "CENTER", 440, -180 } },
-		pet = { on = true, w = 120, h = 28, scale = 1, default = { "CENTER", "CENTER", -320, -226 } },
-		focus = { on = true, w = 170, h = 38, scale = 1, default = { "CENTER", "CENTER", -460, -40 } },
-		party = { on = true, player = false, raid = false, horizontal = false, pets = false, w = 176, h = 40, scale = 1, default = { "TOPLEFT", "TOPLEFT", 24, -190 } },
-		raid = { on = true, forParty = false, hideDefault = true, w = 74, h = 36, scale = 1, default = { "TOPLEFT", "TOPLEFT", 24, -160 } },
+		player = { on = true, w = 220, h = 46, portrait = false, icons = true, mana = true, scale = 1 },
+		target = { on = true, w = 220, h = 46, portrait = false, castbar = true, combo = true, auras = true, scale = 1 },
+		tot = { on = true, w = 110, h = 26, scale = 1 },
+		pet = { on = true, w = 120, h = 28, scale = 1 },
+		focus = { on = true, w = 170, h = 38, scale = 1 },
+		party = { on = true, player = false, raid = false, horizontal = false, pets = false, w = 176, h = 40, scale = 1 },
+		raid = { on = true, forParty = false, hideDefault = true, w = 74, h = 36, scale = 1 },
 	},
+}
+
+ns.POS = {
+	player = { "CENTER", "CENTER", -270, -170 },
+	target = { "CENTER", "CENTER", 270, -170 },
+	tot = { "CENTER", "CENTER", 440, -180 },
+	pet = { "CENTER", "CENTER", -320, -226 },
+	focus = { "CENTER", "CENTER", -460, -40 },
+	party = { "TOPLEFT", "TOPLEFT", 24, -190 },
+	raid = { "TOPLEFT", "TOPLEFT", 24, -160 },
 }
 
 ns.KEYS = { "player", "target", "tot", "pet", "focus", "party", "raid" }
@@ -49,13 +64,37 @@ ns:On("PLAYER_REGEN_ENABLED", function()
 end)
 
 function ns.HasACast()
-	if ACastDB ~= nil then return true end
-	local loaded = (C_AddOns and C_AddOns.IsAddOnLoaded) or IsAddOnLoaded
-	if loaded then
+	local sv = ACastDB
+	if sv == nil then
+		local loaded = (C_AddOns and C_AddOns.IsAddOnLoaded) or IsAddOnLoaded
+		if not loaded then return false end
 		local ok, v = pcall(loaded, "ACast")
-		if ok and v then return true end
+		return ok and v and true or false
 	end
-	return false
+	local prof = type(sv) == "table" and type(sv.profiles) == "table" and sv.profiles[ACore.Profile()]
+	if type(prof) == "table" and type(prof.target) == "table" and prof.target.show == false then return false end
+	return true
+end
+
+ns.CLICKS = {
+	{ "shift-", 1, "Shift + left click" }, { "ctrl-", 1, "Ctrl + left click" }, { "alt-", 1, "Alt + left click" },
+	{ "shift-", 2, "Shift + right click" }, { "ctrl-", 2, "Ctrl + right click" }, { "alt-", 2, "Alt + right click" },
+	{ "", 3, "Middle click" },
+}
+
+function ns.Clicks()
+	local all = ns.db.clicks
+	local class = ns.playerClass or "?"
+	if type(all[class]) ~= "table" then all[class] = {} end
+	return all[class]
+end
+
+function ns.SetClick(index, spell)
+	local c = ns.CLICKS[index]
+	if not c then return end
+	spell = tostring(spell or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	ns.Clicks()[c[1] .. c[2]] = spell ~= "" and spell or nil
+	ns.Apply()
 end
 
 function ns.ToggleOptions()
@@ -83,6 +122,8 @@ SlashCmdList["AFRAMES"] = function(msg)
 		ns.ToggleOptions()
 	elseif msg == "unlock" or msg == "move" then
 		if not ACore.LayoutMode(true) then ns.Print("cannot move frames in combat") end
+	elseif msg == "auras" then
+		ns.AuraReport("target")
 	elseif msg == "lock" then
 		ACore.LayoutMode(false)
 	elseif msg == "reset" then
@@ -92,6 +133,6 @@ SlashCmdList["AFRAMES"] = function(msg)
 		end
 		ns.Apply()
 	else
-		ns.Print("/aframes, /aframes unlock, /aframes lock, /aframes reset")
+		ns.Print("/aframes, /aframes unlock, /aframes lock, /aframes reset, /aframes auras")
 	end
 end

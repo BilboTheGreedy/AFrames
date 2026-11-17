@@ -43,12 +43,12 @@ end
 local function statusIcons(b)
 	local over = b.over
 	b.rest = UI.Text(over, "GameFontHighlightSmall", "LEFT", { 0.6, 0.8, 1 })
-	b.rest:SetPoint("BOTTOMLEFT", over, "TOPLEFT", 12, -5)
+	b.rest:SetPoint("BOTTOMLEFT", over, "TOPLEFT", 24, -5)
 	b.rest:SetText("zZ")
 	b.rest:Hide()
 	b.fight = over:CreateTexture(nil, "OVERLAY")
 	b.fight:SetSize(14, 14)
-	b.fight:SetPoint("BOTTOMLEFT", over, "TOPLEFT", 12, -6)
+	b.fight:SetPoint("BOTTOMLEFT", over, "TOPLEFT", 24, -6)
 	b.fight:SetTexture("Interface\\CharacterFrame\\UI-StateIcon")
 	b.fight:SetTexCoord(0.5, 1, 0, 0.49)
 	b.fight:Hide()
@@ -136,6 +136,10 @@ local function castBar(b)
 	bar.icon:SetSize(14, 14)
 	bar.icon:SetPoint("RIGHT", bar, "LEFT", -1, 0)
 	bar.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+	bar.shield = bar:CreateTexture(nil, "ARTWORK", nil, 1)
+	bar.shield:SetAllPoints(bar:GetStatusBarTexture() or bar)
+	bar.shield:SetColorTexture(0.6, 0.6, 0.65, 1)
+	bar.shield:SetAlpha(0)
 	bar:Hide()
 	bar:SetScript("OnUpdate", function(self)
 		local a = self.active
@@ -144,6 +148,7 @@ local function castBar(b)
 		if now >= a[2] then
 			self.active = nil
 			self:Hide()
+			b.auraOffset = 0
 			ns.UpdateAuras(b)
 			return
 		end
@@ -180,10 +185,12 @@ local function updateCast(b)
 	if not secret(name) and not name then return done() end
 	bar.left:SetText(name)
 	bar.icon:SetTexture(tex)
-	if yes(shield) then
-		bar:SetColor(0.6, 0.6, 0.65)
-	else
-		bar:SetColor(C.accent[1], C.accent[2], C.accent[3], 0.85)
+	bar:SetColor(C.accent[1], C.accent[2], C.accent[3], 0.85)
+	local grey = bar.shield
+	if not secret(shield) then
+		grey:SetAlpha(shield and 1 or 0)
+	elseif not (grey.SetAlphaFromBoolean and pcall(grey.SetAlphaFromBoolean, grey, shield, 1, 0)) then
+		grey:SetAlpha(0)
 	end
 	if secret(s) or secret(e) or type(s) ~= "number" or type(e) ~= "number" then
 		bar.active = nil
@@ -191,7 +198,14 @@ local function updateCast(b)
 		local fn = channel and UnitChannelDuration or UnitCastingDuration
 		if fn and bar.SetTimerDuration then
 			local ok, d = pcall(fn, b.unit)
-			if ok and d then set = pcall(bar.SetTimerDuration, bar, d) end
+			if ok and d then
+				local dir = Enum and Enum.StatusBarTimerDirection
+				local smooth = Enum and Enum.StatusBarInterpolation
+				if dir and smooth then
+					set = pcall(bar.SetTimerDuration, bar, d, smooth.Immediate, channel and dir.RemainingTime or dir.ElapsedTime)
+				end
+				if not set then set = pcall(bar.SetTimerDuration, bar, d) end
+			end
 		end
 		if not set then
 			bar:SetMinMaxValues(0, 1)
@@ -207,11 +221,37 @@ local function updateCast(b)
 	if not was then ns.UpdateAuras(b) end
 end
 
+local function manaBar(b)
+	local bar = CreateFrame("StatusBar", nil, b.over)
+	bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
+	bar:SetStatusBarColor(0.25, 0.45, 0.95, 1)
+	bar:SetHeight(3)
+	bar:SetPoint("BOTTOMLEFT", b.power, "TOPLEFT", 0, 1)
+	bar:SetPoint("BOTTOMRIGHT", b.power, "TOPRIGHT", 0, 1)
+	UI.Fill(bar, { 0, 0, 0, 0.6 })
+	bar:Hide()
+	b.mana = bar
+end
+
+local function updateMana(b)
+	local bar = b.mana
+	if not bar then return end
+	local _, token = UnitPowerType("player")
+	if ns.playerClass ~= "DRUID" or not ns.db.units.player.mana or secret(token) or token == "MANA" then
+		bar:Hide()
+		return
+	end
+	bar:SetMinMaxValues(0, UnitPowerMax("player", 0))
+	bar:SetValue(UnitPower("player", 0))
+	bar:Show()
+end
+
 function ns.Decorate(b, key)
 	b.key = key
 	if key == "player" then
 		portrait(b, "LEFT")
 		statusIcons(b)
+		manaBar(b)
 	elseif key == "target" then
 		portrait(b, "RIGHT")
 		combo(b)
@@ -238,6 +278,7 @@ function ns.UpdateExtras(b)
 	updateStatus(b)
 	updateCombo(b)
 	updateCast(b)
+	updateMana(b)
 end
 
 local function player(fn)
@@ -250,7 +291,16 @@ ns:On("UNIT_PORTRAIT_UPDATE", function(unit) ns.Each(updatePortrait, unit) end)
 ns:On("UNIT_MODEL_CHANGED", function(unit) ns.Each(updatePortrait, unit) end)
 ns:On("UNIT_COMBO_POINTS", function() ns.Each(updateCombo, "target") end)
 ns:On("UNIT_POWER_UPDATE", function(unit)
-	if not secret(unit) and unit == "player" then ns.Each(updateCombo, "target") end
+	if not secret(unit) and unit == "player" then
+		ns.Each(updateCombo, "target")
+		ns.Each(updateMana, "player")
+	end
+end)
+ns:On("UNIT_DISPLAYPOWER", function(unit)
+	if not secret(unit) and unit == "player" then ns.Each(updateMana, "player") end
+end)
+ns:On("UNIT_MAXPOWER", function(unit)
+	if not secret(unit) and unit == "player" then ns.Each(updateMana, "player") end
 end)
 for _, e in ipairs({
 	"UNIT_SPELLCAST_START", "UNIT_SPELLCAST_STOP", "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_INTERRUPTED",

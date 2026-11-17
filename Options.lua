@@ -2,6 +2,7 @@ local _, ns = ...
 local UI = ns.UI
 
 local TEXTS = { "percent", "value", "deficit", "none" }
+local AURAS = { 0.8, 1, 1.25, 1.5 }
 local WIDTHS = {
 	player = { 180, 200, 220, 240, 260 }, target = { 180, 200, 220, 240, 260 }, tot = { 90, 110, 130, 150 },
 	pet = { 100, 120, 140, 160 }, focus = { 140, 170, 200, 220 }, party = { 140, 160, 176, 200, 220 },
@@ -46,8 +47,9 @@ function ns.Options()
 		{ text = "Player and target", title = true },
 		UI.Check(U.player, "portrait", "Player portrait", look),
 		UI.Check(U.player, "icons", "Resting, combat and PvP marks", look),
+		UI.Check(U.player, "mana", "Druid mana bar while shapeshifted", look),
 		UI.Check(U.target, "portrait", "Target portrait", look),
-		UI.Check(U.target, "castbar", "Target cast bar (not used when ACast is loaded)", look),
+		UI.Check(U.target, "castbar", "Target cast bar (not used when ACast shows one)", look),
 		UI.Check(U.target, "combo", "Combo points on the target", look),
 		{ text = "Party and raid", title = true },
 		UI.Check(U.party, "player", "Show me in the party", layout),
@@ -60,8 +62,18 @@ function ns.Options()
 		UI.Check(db, "classColor", "Class colours", look),
 		UI.Check(db, "debuffs", "Debuffs", look),
 		UI.Check(db, "buffs", "Buffs", look),
+		UI.Check(db, "dispelMine", "Party and raid border only for debuffs I can remove", look),
+		UI.Check(db, "threat", "Red border on aggro", look),
+		UI.Check(db, "powerText", "Power text", layout),
 		UI.Check(db, "range", "Fade when out of range", look),
 		UI.Check(db, "tooltips", "Tooltips", look),
+		{
+			text = "Buff and debuff size: " .. math.floor((db.auraScale or 1) * 100 + 0.5) .. "%",
+			func = function()
+				db.auraScale = cycle(AURAS, db.auraScale or 1)
+				ns.Each(ns.UpdateAuras)
+			end,
+		},
 		{
 			text = "Health text: " .. db.healthText,
 			func = function()
@@ -90,6 +102,17 @@ function ns.Options()
 				end,
 			}
 		end
+	end
+	list[#list + 1] = { text = "Click casting (" .. tostring(ns.playerClass) .. ", empty name clears)", title = true }
+	local clicks = ns.Clicks()
+	for i, c in ipairs(ns.CLICKS) do
+		local spell = clicks[c[1] .. c[2]]
+		list[#list + 1] = {
+			text = c[3] .. ": " .. (spell or "not set"),
+			func = function()
+				UI.Prompt("Spell for " .. c[3]:lower(), spell or "", function(text) ns.SetClick(i, text) end)
+			end,
+		}
 	end
 	list[#list + 1] = { text = "Layout changes wait until you leave combat", title = true }
 	return list

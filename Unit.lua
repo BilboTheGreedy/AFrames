@@ -5,6 +5,7 @@ local C = UI.colors
 local secret = A.IsSecret
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
+local QUESTION = "Interface\\Icons\\INV_Misc_QuestionMark"
 
 local POWER = {
 	MANA = { 0.25, 0.45, 0.95 },
@@ -37,7 +38,10 @@ end
 
 local function short(v)
 	if secret(v) then
-		if AbbreviateNumbers then return AbbreviateNumbers(v) end
+		if AbbreviateNumbers then
+			local ok, text = pcall(AbbreviateNumbers, v)
+			if ok then return text end
+		end
 		return v
 	end
 	if type(v) ~= "number" then return "" end
@@ -52,7 +56,7 @@ local function dispelColor(unit, data)
 		if c then return c[1], c[2], c[3], 1 end
 		return nil
 	end
-	if not (C_UnitAuras.GetAuraDispelTypeColor and C_CurveUtil and C_CurveUtil.CreateColorCurve and CreateColor and Enum and Enum.LuaCurveType) then
+	if not (C_UnitAuras and C_UnitAuras.GetAuraDispelTypeColor and data.auraInstanceID and C_CurveUtil and C_CurveUtil.CreateColorCurve and CreateColor and Enum and Enum.LuaCurveType) then
 		return nil
 	end
 	if not dispelCurve then
@@ -75,10 +79,157 @@ local function dispelColor(unit, data)
 end
 
 ns.Yes = yes
+ns.Short = short
+
+local logged = {}
+local function note(what, err)
+	local msg = what .. ": " .. tostring(err)
+	if logged[msg] then return end
+	logged[msg] = true
+	if ABug and ABug.Log then pcall(ABug.Log, "caught", "AFrames: " .. msg) end
+end
+ns.Note = note
+
+local SCAN = 40
+
+local function own(data)
+	local mine = data.isFromPlayerOrPlayerPet
+	if not secret(mine) and mine then return true end
+	local src = data.sourceUnit
+	if not secret(src) and (src == "player" or src == "pet" or src == "vehicle") then return true end
+	return false
+end
+
+local function readable(data)
+	if type(data) ~= "table" or secret(data) then return false end
+	if issecrettable then
+		local ok, hidden = pcall(issecrettable, data)
+		if ok and hidden then return false end
+	end
+	return true
+end
+
+local function byIndex(unit, filter, max, out, mine)
+	local fn = C_UnitAuras and C_UnitAuras.GetAuraDataByIndex
+	if not fn then return end
+	for i = 1, mine and SCAN or max do
+		local data = fn(unit, i, filter)
+		if data == nil then return end
+		if readable(data) and (not mine or own(data)) then out[#out + 1] = data end
+		if #out >= max then return end
+	end
+end
+
+local function byList(unit, filter, max, out, mine)
+	local fn = C_UnitAuras and C_UnitAuras.GetUnitAuras
+	if not fn then return end
+	local list = fn(unit, filter, not mine and max or nil)
+	if not readable(list) then return end
+	for i = 1, #list do
+		if #out >= max then return end
+		local data = list[i]
+		if readable(data) and (not mine or own(data)) then out[#out + 1] = data end
+	end
+end
+
+local function slots(unit, max, out, _, ...)
+	for i = 1, select("#", ...) do
+		if #out >= max then return end
+		local data = C_UnitAuras.GetAuraDataBySlot(unit, (select(i, ...)))
+		if readable(data) then out[#out + 1] = data end
+	end
+end
+
+local function bySlots(unit, filter, max, out)
+	if not (C_UnitAuras and C_UnitAuras.GetAuraSlots and C_UnitAuras.GetAuraDataBySlot) then return end
+	slots(unit, max, out, C_UnitAuras.GetAuraSlots(unit, filter, max))
+end
+
+local function byEach(unit, filter, max, out)
+	if not (AuraUtil and AuraUtil.ForEachAura) then return end
+	AuraUtil.ForEachAura(unit, filter, max, function(data)
+		if readable(data) then out[#out + 1] = data end
+		return #out >= max
+	end, true)
+end
+
+local function byOld(unit, filter, max, out)
+	local fn = UnitBuff
+	if filter:find("HARMFUL") then fn = UnitDebuff end
+	if not fn then fn = UnitAura end
+	if not fn then return end
+	for i = 1, max do
+		local name, icon, count, kind, duration, expires, source = fn(unit, i, filter)
+		if not secret(name) and not name then return end
+		out[#out + 1] = {
+			name = name, icon = icon, applications = count, dispelName = kind, duration = duration,
+			expirationTime = expires, sourceUnit = source,
+		}
+	end
+end
+
+local METHODS = {
+	{ "GetUnitAuras", byList }, { "GetAuraDataByIndex", byIndex }, { "GetAuraSlots", bySlots },
+	{ "ForEachAura", byEach }, { "UnitAura", byOld },
+}
+
+local function gather(i, unit, filter, max, out, mine)
+	local m = METHODS[i]
+	local ok, err = pcall(m[2], unit, filter, max, out, mine)
+	if not ok then note(m[1] .. " " .. filter, err) end
+	return #out > 0
+end
+
+function ns.Auras(unit, filter, max)
+	local out = {}
+	if not max or max <= 0 then return out end
+	if gather(1, unit, filter, max, out) then return out end
+	if gather(2, unit, filter, max, out) then
+		note("auras read through " .. METHODS[2][1], filter)
+		return out
+	end
+	local base = filter:match("^(%u+)|PLAYER$")
+	if base then
+		for i = 1, 2 do
+			if gather(i, unit, base, max, out, true) then
+				note("own auras read through " .. METHODS[i][1], filter)
+				return out
+			end
+		end
+	end
+	for i = 3, #METHODS do
+		if gather(i, unit, filter, max, out) then
+			note("auras read through " .. METHODS[i][1], filter)
+			return out
+		end
+	end
+	return out
+end
+
+function ns.AuraReport(unit)
+	unit = unit or "target"
+	local lines = { "auras on " .. unit .. ", combat " .. tostring(InCombatLockdown and InCombatLockdown() and true or false) }
+	for _, filter in ipairs({ "HARMFUL", "HARMFUL|PLAYER" }) do
+		for _, m in ipairs(METHODS) do
+			local out = {}
+			local ok, err = pcall(m[2], unit, filter, SCAN, out)
+			local line = filter .. " " .. m[1] .. ": " .. (ok and #out or ("error " .. tostring(err)))
+			local d = out[1]
+			if d then
+				line = line .. ", icon secret " .. tostring(secret(d.icon)) .. ", id secret " .. tostring(secret(d.auraInstanceID))
+			end
+			lines[#lines + 1] = line
+		end
+	end
+	for _, line in ipairs(lines) do ns.Print(line) end
+	if ABug and ABug.Log then pcall(ABug.Log, "caught", "AFrames: " .. table.concat(lines, "; ")) end
+	return lines
+end
 
 local function auraIcon(b, size)
 	local f = CreateFrame("Frame", nil, b.body)
 	f:SetSize(size, size)
+	UI.Fill(f, { 0, 0, 0, 1 })
 	f.tex = f:CreateTexture(nil, "ARTWORK")
 	f.tex:SetAllPoints(f)
 	f.tex:SetTexCoord(0.07, 0.93, 0.07, 0.93)
@@ -91,6 +242,8 @@ local function auraIcon(b, size)
 			cd:SetAllPoints(f)
 			if cd.SetReverse then cd:SetReverse(true) end
 			f.cd = cd
+		else
+			note("Cooldown", cd)
 		end
 	end
 	return f
@@ -99,9 +252,15 @@ end
 local function setTimer(icon, unit, data)
 	local cd = icon.cd
 	if not cd then return end
-	if C_UnitAuras.GetAuraDuration and cd.SetCooldownFromDurationObject and data.auraInstanceID then
+	if C_UnitAuras and C_UnitAuras.GetAuraDuration and cd.SetCooldownFromDurationObject and data.auraInstanceID then
 		local ok, d = pcall(C_UnitAuras.GetAuraDuration, unit, data.auraInstanceID)
-		if ok and d and pcall(cd.SetCooldownFromDurationObject, cd, d) then return end
+		if not ok then
+			note("GetAuraDuration", d)
+		elseif d then
+			local set, err = pcall(cd.SetCooldownFromDurationObject, cd, d)
+			if set then return end
+			note("SetCooldownFromDurationObject", err)
+		end
 	end
 	local dur, exp = data.duration, data.expirationTime
 	if not secret(dur) and not secret(exp) and type(dur) == "number" and type(exp) == "number" and dur > 0 then
@@ -113,57 +272,56 @@ end
 
 local function fillAuras(b, icons, filter, max, size, highlight, big)
 	local unit = b.unit
-	local shown = 0
+	local list = ns.Auras(unit, filter, max)
 	local first
-	if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-		for i = 1, max do
-			local ok, data = pcall(C_UnitAuras.GetAuraDataByIndex, unit, i, filter)
-			if not ok or not data then break end
-			shown = shown + 1
-			local icon = icons[shown]
-			if not icon then
-				icon = auraIcon(b, size)
-				icons[shown] = icon
-			end
-			local own = data.isFromPlayerOrPlayerPet
-			local s = size
-			if big and not secret(own) and own then s = size + 6 end
-			icon.size = s
-			icon:SetSize(s, s)
-			icon.tex:SetTexture(data.icon)
-			if C_UnitAuras.GetAuraApplicationDisplayCount and data.auraInstanceID then
-				local okc, text = pcall(C_UnitAuras.GetAuraApplicationDisplayCount, unit, data.auraInstanceID, 2, 99)
-				if not okc then
-					icon.count:SetText("")
-				elseif secret(text) then
-					icon.count:SetText(text)
-				else
-					icon.count:SetText(text or "")
-				end
-			else
-				local n = data.applications
-				if not secret(n) and type(n) == "number" and n > 1 then
-					icon.count:SetText(n)
-				else
-					icon.count:SetText("")
-				end
-			end
-			setTimer(icon, unit, data)
-			local r, g, bl, a
-			if highlight then r, g, bl, a = dispelColor(unit, data) end
-			if r and not first then first = { r, g, bl, a or 1 } end
-			for _, e in ipairs(icon.edges) do
-				if r then
-					e:SetColorTexture(r, g, bl, a or 1)
-				else
-					e:SetColorTexture(0, 0, 0, 1)
-				end
-			end
-			icon:Show()
+	for shown = 1, #list do
+		local data = list[shown]
+		local icon = icons[shown]
+		if not icon then
+			icon = auraIcon(b, size)
+			icons[shown] = icon
 		end
+		local s = size
+		if big and own(data) then s = size + 6 end
+		icon.size = s
+		icon:SetSize(s, s)
+		local drawn, why = pcall(icon.tex.SetTexture, icon.tex, data.icon)
+		if not drawn then
+			note("SetTexture", why)
+			icon.tex:SetTexture(QUESTION)
+		end
+		local id = data.auraInstanceID
+		if C_UnitAuras and C_UnitAuras.GetAuraApplicationDisplayCount and id then
+			local okc, text = pcall(C_UnitAuras.GetAuraApplicationDisplayCount, unit, id, 2, 99)
+			if not okc then
+				note("GetAuraApplicationDisplayCount", text)
+				icon.count:SetText("")
+			elseif secret(text) then
+				icon.count:SetText(text)
+			else
+				icon.count:SetText(text or "")
+			end
+		else
+			local n = data.applications
+			if not secret(n) and type(n) == "number" and n > 1 then
+				icon.count:SetText(n)
+			else
+				icon.count:SetText("")
+			end
+		end
+		setTimer(icon, unit, data)
+		local r, g, bl, a
+		if highlight then r, g, bl, a = dispelColor(unit, data) end
+		if r and not first then first = { r, g, bl, a or 1 } end
+		for _, e in ipairs(icon.edges) do
+			if not r or not pcall(e.SetColorTexture, e, r, g, bl, a or 1) then
+				e:SetColorTexture(0, 0, 0, 1)
+			end
+		end
+		icon:Show()
 	end
-	for i = shown + 1, #icons do icons[i]:Hide() end
-	return shown, first
+	for i = #list + 1, #icons do icons[i]:Hide() end
+	return #list, first
 end
 
 local function placeAuras(b)
@@ -210,6 +368,7 @@ function ns.UpdateAuras(b)
 	local db = ns.db
 	if b.style == "small" then return end
 	local hostile = yes(UnitCanAttack and UnitCanAttack("player", b.unit))
+	local k = db.auraScale or 1
 	local nd, nb = b.maxDebuffs or 4, b.maxBuffs or 4
 	if not db.debuffs then nd = 0 end
 	if not db.buffs then nb = 0 end
@@ -220,10 +379,18 @@ function ns.UpdateAuras(b)
 		dfilter = hostile and "HARMFUL|PLAYER" or "HARMFUL"
 		bfilter = hostile and "HELPFUL" or "HELPFUL|PLAYER"
 	end
-	local _, color = fillAuras(b, b.debuffs, dfilter, nd, b.debuffSize or 22, not hostile, b.allAuras)
-	fillAuras(b, b.buffs, bfilter, nb, b.buffSize or 16, false, false)
+	local mineOnly = db.dispelMine and b.ranged
+	local _, color = fillAuras(b, b.debuffs, dfilter, nd, math.floor((b.debuffSize or 22) * k + 0.5), not hostile and not mineOnly, b.allAuras)
+	fillAuras(b, b.buffs, bfilter, nb, math.floor((b.buffSize or 16) * k + 0.5), false, false)
 	placeAuras(b)
-	if b.style == "raid" then
+	if b.ranged then
+		if mineOnly and not hostile and nd > 0 then
+			local first = ns.Auras(b.unit, "HARMFUL|RAID", 1)[1]
+			if first then
+				local r, g, bl, a = dispelColor(b.unit, first)
+				color = r and { r, g, bl, a or 1 } or DISPEL.Magic
+			end
+		end
 		b.dispel = color
 		ns.UpdateTarget(b)
 	end
@@ -328,8 +495,16 @@ function ns.UpdatePower(b)
 	else
 		b.power:SetColor(0.25, 0.45, 0.95)
 	end
-	b.power:SetMinMaxValues(0, UnitPowerMax(unit))
-	b.power:SetValue(UnitPower(unit))
+	local cur, max = UnitPower(unit), UnitPowerMax(unit)
+	b.power:SetMinMaxValues(0, max)
+	b.power:SetValue(cur)
+	local t = b.ptext
+	if not t then return end
+	if not ns.db.powerText or (not secret(max) and (type(max) ~= "number" or max <= 0)) then
+		t:SetText("")
+	else
+		t:SetText(short(cur))
+	end
 end
 
 local TAGS = { elite = "+", rareelite = "R+", rare = "R", worldboss = "B" }
@@ -352,6 +527,7 @@ end
 function ns.UpdateName(b)
 	local unit = b.unit
 	b.health.left:SetText(UnitName(unit))
+	if b.unit == "pet" then b.nameColor = nil end
 	if b.unit == "pet" and GetPetHappiness then
 		local ok, mood = pcall(GetPetHappiness)
 		if ok and not secret(mood) and type(mood) == "number" then
@@ -387,9 +563,24 @@ function ns.UpdateName(b)
 	end
 end
 
+local function looter()
+	local fn = (C_PartyInfo and C_PartyInfo.GetLootMethod) or GetLootMethod
+	if not fn then return nil end
+	local ok, method, pid, rid = pcall(fn)
+	if not ok or secret(method) or secret(pid) or secret(rid) or method == nil then return nil end
+	local master = Enum and Enum.LootMethod and Enum.LootMethod.Masterlooter
+	if method ~= "master" and method ~= master then return nil end
+	if type(rid) == "number" then return "raid" .. rid end
+	if pid == 0 then return "player" end
+	if type(pid) == "number" then return "party" .. pid end
+	return nil
+end
+
 function ns.UpdateIcons(b)
 	local unit = b.unit
 	b.leader:SetShown(yes(UnitIsGroupLeader and UnitIsGroupLeader(unit)))
+	local who = looter()
+	b.loot:SetShown(who ~= nil and yes(UnitIsUnit(unit, who)))
 	local role = UnitGroupRolesAssigned and UnitGroupRolesAssigned(unit)
 	local r = not secret(role) and role and ROLE[role]
 	if r then
@@ -425,10 +616,24 @@ end
 
 function ns.UpdateTarget(b)
 	local on = b.unit ~= "target" and yes(UnitIsUnit(b.unit, "target"))
-	local c = on and C.accent or b.dispel or C.line
+	local c = on and C.accent or b.dispel or b.threat or C.line
 	for _, e in ipairs(b.edges) do
-		e:SetColorTexture(c[1], c[2], c[3], 1)
+		if not pcall(e.SetColorTexture, e, c[1], c[2], c[3], 1) then
+			e:SetColorTexture(C.line[1], C.line[2], C.line[3], 1)
+		end
 	end
+end
+
+local AGGRO = { 1, 0.2, 0.15 }
+
+function ns.UpdateThreat(b)
+	local status
+	if b.aggro and ns.db.threat and UnitThreatSituation then
+		local ok, v = pcall(UnitThreatSituation, b.unit)
+		if ok and not secret(v) and type(v) == "number" then status = v end
+	end
+	b.threat = status and status >= 2 and AGGRO or nil
+	ns.UpdateTarget(b)
 end
 
 function ns.UpdateRange(b)
@@ -456,7 +661,7 @@ function ns.UpdateAll(b)
 	ns.UpdateHealth(b)
 	ns.UpdatePower(b)
 	ns.UpdateIcons(b)
-	ns.UpdateTarget(b)
+	ns.UpdateThreat(b)
 	ns.UpdateAuras(b)
 	ns.UpdateRange(b)
 	if ns.UpdateExtras then ns.UpdateExtras(b) end
@@ -480,6 +685,10 @@ end
 function ns.Resize(b, width, height)
 	b:SetSize(width, height)
 	b.pred:SetWidth(width - 2)
+	if b.ptext then
+		b.health.right:ClearAllPoints()
+		b.health.right:SetPoint("RIGHT", b.health, "RIGHT", -5, ns.db.powerText and 6 or 0)
+	end
 	if b.onResize then b.onResize(b, width, height) end
 end
 
@@ -490,6 +699,7 @@ function ns.CreateUnit(name, parent, unit, style, auraSide)
 	b.style = style
 	b.auraSide = auraSide
 	b.ranged = unit:find("^party") ~= nil or unit:find("^raid") ~= nil
+	b.aggro = b.ranged or unit == "player" or unit == "pet"
 	b:SetSize(100, 30)
 	b:SetAttribute("unit", unit)
 	b:SetAttribute("*type1", "target")
@@ -538,6 +748,8 @@ function ns.CreateUnit(name, parent, unit, style, auraSide)
 		b.level = UI.Text(over, "GameFontHighlightSmall", "LEFT", C.dim)
 		b.level:SetPoint("LEFT", health, "LEFT", 5, 0)
 		health.left:SetPoint("LEFT", b.level, "RIGHT", 4, 0)
+		b.ptext = UI.Text(over, "GameFontHighlightSmall", "RIGHT", C.dim)
+		b.ptext:SetPoint("BOTTOMRIGHT", health, "BOTTOMRIGHT", -5, 3)
 	else
 		health.left:SetPoint("LEFT", health, "LEFT", 4, 0)
 	end
@@ -548,6 +760,17 @@ function ns.CreateUnit(name, parent, unit, style, auraSide)
 	b.leader:SetPoint("TOPLEFT", -3, 6)
 	b.leader:SetTexture("Interface\\GroupFrame\\UI-Group-LeaderIcon")
 	b.leader:Hide()
+
+	b.loot = over:CreateTexture(nil, "OVERLAY")
+	b.loot:SetSize(11, 11)
+	b.loot:SetPoint("TOPLEFT", 9, 6)
+	b.loot:SetTexture("Interface\\GroupFrame\\UI-Group-MasterLooter")
+	b.loot:Hide()
+
+	b.hover = over:CreateTexture(nil, "ARTWORK")
+	b.hover:SetAllPoints(body)
+	b.hover:SetColorTexture(1, 1, 1, 0.08)
+	b.hover:Hide()
 
 	b.role = UI.Text(over, "GameFontHighlightSmall", "RIGHT")
 	b.role:SetPoint("TOPRIGHT", -3, 6)
@@ -570,6 +793,7 @@ function ns.CreateUnit(name, parent, unit, style, auraSide)
 
 	b:SetScript("OnShow", function(self) ns.UpdateAll(self) end)
 	b:SetScript("OnEnter", function(self)
+		self.hover:Show()
 		if not ns.db.tooltips then return end
 		if GameTooltip_SetDefaultAnchor then
 			GameTooltip_SetDefaultAnchor(GameTooltip, self)
@@ -579,7 +803,10 @@ function ns.CreateUnit(name, parent, unit, style, auraSide)
 		pcall(GameTooltip.SetUnit, GameTooltip, self.unit)
 		GameTooltip:Show()
 	end)
-	b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	b:SetScript("OnLeave", function(self)
+		self.hover:Hide()
+		GameTooltip:Hide()
+	end)
 
 	ns.buttons[#ns.buttons + 1] = b
 	ns.byUnit[unit] = ns.byUnit[unit] or {}
@@ -602,6 +829,7 @@ unitEvent("UNIT_DISPLAYPOWER", ns.UpdatePower)
 unitEvent("UNIT_NAME_UPDATE", ns.UpdateName)
 unitEvent("UNIT_LEVEL", ns.UpdateName)
 unitEvent("UNIT_AURA", ns.UpdateAuras)
+unitEvent("UNIT_THREAT_SITUATION_UPDATE", ns.UpdateThreat)
 
 ns:On("GROUP_ROSTER_UPDATE", function() ns.Each(ns.UpdateAll) end)
 ns:On("PLAYER_ENTERING_WORLD", function() ns.Each(ns.UpdateAll) end)
@@ -615,7 +843,12 @@ ns:On("PLAYER_TARGET_CHANGED", function()
 end)
 ns:On("PLAYER_FOCUS_CHANGED", function() ns.Each(ns.UpdateAll, "focus") end)
 ns:On("UNIT_PET", function() ns.Each(ns.UpdateAll) end)
-ns:On("UNIT_HAPPINESS", function() ns.Each(ns.UpdateName, "pet") end)
+ns:On("UNIT_HAPPINESS", function()
+	ns.Each(ns.UpdateName, "pet")
+	ns.Each(ns.UpdateHealth, "pet")
+end)
+ns:On("PARTY_LOOT_METHOD_CHANGED", function() ns.Each(ns.UpdateIcons) end)
+ns:On("PLAYER_REGEN_ENABLED", function() ns.Each(ns.UpdateAuras) end)
 ns:On("UNIT_CLASSIFICATION_CHANGED", function(unit) ns.Each(ns.UpdateName, unit) end)
 ns:On("UNIT_FACTION", function(unit) ns.Each(ns.UpdateAll, unit) end)
 ns:On("READY_CHECK", function() ns.Each(ns.UpdateIcons) end)

@@ -40,6 +40,7 @@ end
 
 local function holder(key)
 	local cfg = ns.db.units[key]
+	cfg.default = ns.POS[key]
 	local f = CreateFrame("Frame", NAMES[key], UIParent)
 	f:SetSize(100, 30)
 	UI.Movable(f, cfg)
@@ -239,6 +240,15 @@ local function apply()
 		p:SetSize(n * pw + (n - 1) * GAP, ph)
 	else
 		p:SetSize(pw, n * ph + (n - 1) * GAP)
+	end
+
+	local clicks = ns.Clicks()
+	for _, b in ipairs(ns.buttons) do
+		for _, c in ipairs(ns.CLICKS) do
+			local spell = clicks[c[1] .. c[2]]
+			b:SetAttribute(c[1] .. "type" .. c[2], spell and "spell" or nil)
+			b:SetAttribute(c[1] .. "spell" .. c[2], spell)
+		end
 	end
 
 	layoutRaid()
